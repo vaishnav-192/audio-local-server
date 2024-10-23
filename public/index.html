@@ -18,7 +18,7 @@
 
     <!-- Main Script for Handling WebRTC and Call Logic -->
     <script>
-        const socket = io('http://192.168.1.47:3000'); // Connect to the master node
+        const socket = io('https://audio-master-server.vercel.app'); // Connect to the master node
         let localConnection;
         let remoteConnection;
         let localStream;
