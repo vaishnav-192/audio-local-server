@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Active Users</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <h1>Active Users</h1>
+    <ul id="activeUsers" class="user-list"></ul>
+
+    <!-- Audio element to play remote stream -->
+    <audio id="remoteAudio" autoplay></audio>
+
+    <!-- Include the Socket.IO client library -->
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+
+    <!-- Main Script for Handling WebRTC and Call Logic -->
+    <script>
+        const socket = io('http://192.168.1.47:3000'); // Connect to the master node
+        let localConnection;
+        let remoteConnection;
+        let localStream;
+        let remoteStream;
+        let selectedUser;
+        let candidateQueue = []; // Queue for ICE candidates
+        let remoteDescriptionSet = false; // Track when the remote description is set
+
+        const remoteAudio = document.getElementById('remoteAudio');
+
+        // Get the active users and render them in the UI
+        socket.on('active_users', (users) => {
+            const userList = document.getElementById('activeUsers');
+            userList.innerHTML = '';
+            users.forEach((user) => {
+                const li = document.createElement('li');
+                li.className = 'user-item';
+                li.innerHTML = `${user.username} - ${user.ipAddress}`;
+                li.onclick = () => initiateCall(user.username); // Call a specific user on click
+                userList.appendChild(li);
+            });
+        });
+
+        // Fetch active users when the page loads
+        window.onload = () => {
+            const username = prompt("Enter your username:");
+            if (username) {
+                socket.emit('user_online', username); // Send the username to the server
+            }
+        };
+
+        // Initiate a WebRTC call
+        async function initiateCall(username) {
+            selectedUser = username;
+
+            // Create RTCPeerConnection
+            localConnection = new RTCPeerConnection();
+
+            // Get user media (audio)
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localStream.getTracks().forEach(track => localConnection.addTrack(track, localStream));
+
+            // Handle ICE candidates
+            localConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('ice_candidate', { candidate: event.candidate, to: selectedUser });
+                }
+            };
+
+            // Handle remote stream
+            localConnection.ontrack = (event) => {
+                remoteStream = event.streams[0];
+                console.log('Received remote stream:', remoteStream);
+                remoteAudio.srcObject = remoteStream; // Play the remote audio stream
+            };
+
+            // Create an offer and set the local description
+            const offer = await localConnection.createOffer();
+            await localConnection.setLocalDescription(offer);
+
+            // Send the offer to the server
+            socket.emit('call_user', { from: socket.id, to: username, offer: offer });
+        }
+
+        // Handle incoming call
+        socket.on('incoming_call', async ({ from, offer }) => {
+            if (confirm(`${from} is calling you. Do you want to accept?`)) {
+                // Accept the call
+                remoteConnection = new RTCPeerConnection();
+
+                // Get user media (audio)
+                localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                localStream.getTracks().forEach(track => remoteConnection.addTrack(track, localStream));
+
+                // Handle ICE candidates
+                remoteConnection.onicecandidate = (event) => {
+                    if (event.candidate) {
+                        socket.emit('ice_candidate', { candidate: event.candidate, to: from });
+                    }
+                };
+
+                // Handle remote stream
+                remoteConnection.ontrack = (event) => {
+                    remoteStream = event.streams[0];
+                    console.log('Received remote stream:', remoteStream);
+                    remoteAudio.srcObject = remoteStream; // Play the remote audio stream
+                };
+
+                // Set remote description and create an answer
+                await remoteConnection.setRemoteDescription(new RTCSessionDescription(offer));
+                const answer = await remoteConnection.createAnswer();
+                await remoteConnection.setLocalDescription(answer);
+
+                // Send the answer back to the caller
+                socket.emit('call_response', { from, to: socket.id, answer: answer, accepted: true });
+
+                // Mark remote description as set
+                remoteDescriptionSet = true;
+
+                // Process any ICE candidates that were queued before remote description was set
+                candidateQueue.forEach(async candidate => {
+                    await remoteConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                });
+                candidateQueue = []; // Clear the queue
+            } else {
+                // Decline the call
+                socket.emit('call_response', { from, to: socket.id, accepted: false });
+            }
+        });
+
+        // Handle call response
+        socket.on('call_response', async ({ from, answer }) => {
+            await localConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            console.log('Call accepted by', from);
+
+            // Mark remote description as set
+            remoteDescriptionSet = true;
+
+            // Process any ICE candidates that were queued before remote description was set
+            candidateQueue.forEach(async candidate => {
+                await localConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            });
+            candidateQueue = []; // Clear the queue
+        });
+
+        // Handle incoming ICE candidates
+        socket.on('ice_candidate', async ({ candidate }) => {
+            const iceCandidate = new RTCIceCandidate(candidate);
+
+            // If the remote description is set, add the candidate immediately
+            if (remoteDescriptionSet) {
+                await (localConnection || remoteConnection).addIceCandidate(iceCandidate);
+                console.log('ICE candidate added.');
+            } else {
+                // Otherwise, queue the candidate
+                candidateQueue.push(iceCandidate);
+            }
+        });
+    </script>
+</body>
+</html>
